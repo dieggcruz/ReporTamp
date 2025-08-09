@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mapa de Reportes - Tampico (MVP)</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0; }
+    body { font-family: system-ui, Arial, sans-serif; }
+
+    /* Floating buttons */
+    .fab { position: absolute; z-index:1000; right:20px; bottom:20px; }
+    .fab button { background:#2b8cff; color:white; border:none; border-radius:50%; width:56px; height:56px; box-shadow:0 4px 8px rgba(0,0,0,.2); font-size:28px; }
+
+    /* Controls container */
+    .controls { position:absolute; z-index:1000; left:10px; top:10px; background:rgba(255,255,255,0.95); padding:8px; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,.15); }
+    .controls button { margin:4px 0; display:block; width:200px; }
+
+    /* Modal */
+    .modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; z-index:2000; }
+    .modal { background:white; width:95%; max-width:560px; border-radius:8px; padding:16px; box-shadow:0 8px 30px rgba(0,0,0,.25); }
+    .modal h3 { margin-top:0; }
+    .form-row { margin-bottom:8px; }
+    input[type=text], select, textarea { width:100%; padding:8px; border-radius:4px; border:1px solid #ccc; }
+    input[type=file] { width:100%; }
+    .modal .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+    .badge { display:inline-block; padding:6px 10px; border-radius:12px; background:#eee; margin-right:6px; }
+
+    /* Small message */
+    .toast { position: absolute; z-index:3000; left:50%; transform:translateX(-50%); bottom:90px; background:rgba(0,0,0,0.8); color:white; padding:8px 12px; border-radius:6px; display:none; }
+
+    /* Legend */
+    .legend { background:white; padding:8px; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,.12); }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Controls -->
+<div class="controls" id="controls">
+  <div class="legend">
+    <strong>Leyenda / Controles</strong>
+    <div style="margin-top:8px;">
+      <span class="badge">🔴</span> Bache<br>
+      <span class="badge">💡</span> Alumbrado<br>
+      <span class="badge">🚰</span> Fuga<br>
+      <span class="badge">🗑️</span> Acumulación de basura<br>
+      <span class="badge">🤢</span> Drenaje saturado o mal olor constante
+    </div>
+  </div>
+  <div style="margin-top:8px;">
+    <button id="btn-toggle-heat">Activar Mapa de Calor</button>
+    <button id="btn-refresh">Actualizar puntos</button>
+    <button id="btn-basemap">Cambiar vista</button>
+  </div>
+</div>
+
+<!-- Floating action button -->
+<div class="fab">
+  <button id="open-report" title="Generar reporte">+</button>
+</div>
+
+<!-- Modal Form -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3>Nuevo reporte</h3>
+    <p style="margin-top:0; font-size:0.95rem; color:#333">Por favor, agrega foto y una breve descripción. La ubicación puede obtenerse automáticamente.</p>
+    <div class="form-row">
+      <label>Tipo de problema</label>
+      <select id="tipo">
+        <option value="Bache">Bache</option>
+        <option value="Alumbrado">Alumbrado</option>
+        <option value="Fuga">Fuga</option>
+        <option value="Acumulación de basura">Acumulación de basura</option>
+        <option value="Drenaje saturado o mal olor constante">Drenaje saturado o mal olor constante</option>
+        <option value="Otro">Otro</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Descripción</label>
+      <textarea id="descripcion" rows="3" placeholder="Detalles, referencia o calle"></textarea>
+    </div>
+    <div class="form-row">
+      <label>Foto (Obligatorio)</label>
+      <input id="foto" type="file" accept="image/*" />
+    </div>
+    <div class="form-row">
+      <label>Latitud</label>
+      <input id="lat" type="text" readonly />
+    </div>
+    <div class="form-row">
+      <label>Longitud</label>
+      <input id="lng" type="text" readonly />
+    </div>
+    <div style="font-size:0.9rem; color:#666">Al enviar, tu reporte quedará pendiente de validación por el administrador.</div>
+
+    <div class="actions">
+      <button id="cancel">Cancelar</button>
+      <button id="send">Enviar reporte</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast">Mensaje</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+<script>
+// ==================== CONFIGURATION ====================
+// Reemplaza esta URL por la URL de tu Google Apps Script desplegado (web app) que manejará POST y GET.
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx1lCtory0pd45-_cfngDMrXD7hv-NBl_Rof9GI43dqFSHMHjWVk_1Oo70SB-wT43cTwg/exec';
+// =======================================================
+
+let map, currentBasemap, markersLayer, heatLayer, heatEnabled=false;
+const basemaps = [];
+
+function initMap(){
+  map = L.map('map').setView([22.2486, -97.8600], 13); // Tampico approx
+
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  const sat = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '© OpenTopoMap' });
+
+  basemaps.push({name:'OSM', layer:osm});
+  basemaps.push({name:'Topo', layer:sat});
+
+  osm.addTo(map);
+  currentBasemap = 0;
+
+  markersLayer = L.layerGroup().addTo(map);
+}
+
+async function fetchPoints(){
+  try{
+    const res = await fetch(APPS_SCRIPT_URL + '?action=get_validated');
+    const data = await res.json();
+    return data; // array of {lat,lng,tipo,descripcion,foto_url,fecha}
+  }catch(e){
+    console.error('Error al obtener puntos', e);
+    return [];
+  }
+}
+
+function addMarkers(points){
+  markersLayer.clearLayers();
+  const heatPoints = [];
+
+  points.forEach(p => {
+    const lat = parseFloat(p.lat);
+    const lng = parseFloat(p.lng);
+    heatPoints.push([lat,lng,0.6]);
+
+    const iconHtml = (p.tipo === 'Bache')? '🔴' : (p.tipo === 'Alumbrado')? '💡' : (p.tipo === 'Fuga')? '🚰' : (p.tipo === 'Acumulación de basura')? '🗑️' : (p.tipo === 'Drenaje saturado o mal olor constante')? '🤢' :'📍';
+    const marker = L.marker([lat,lng]);
+    const popup = `<div style="min-width:180px"><strong>${p.tipo}</strong><br>${p.descripcion || ''}<br><small>${p.fecha}</small><br>${p.foto_url? ('<a href="'+p.foto_url+'" target="_blank">Ver foto</a>') : ''}</div>`;
+    marker.bindPopup(popup);
+    markersLayer.addLayer(marker);
+  });
+
+  if(heatLayer){ map.removeLayer(heatLayer); heatLayer=null; }
+  heatLayer = L.heatLayer(heatPoints, {radius: 25});
+}
+
+function toggleHeat(){
+  heatEnabled = !heatEnabled;
+  if(heatEnabled){
+    map.addLayer(heatLayer);
+    document.getElementById('btn-toggle-heat').innerText = 'Desactivar Mapa de Calor';
+  }else{
+    if(heatLayer) map.removeLayer(heatLayer);
+    document.getElementById('btn-toggle-heat').innerText = 'Activar Mapa de Calor';
+  }
+}
+
+function changeBasemap(){
+  map.removeLayer(basemaps[currentBasemap].layer);
+  currentBasemap = (currentBasemap + 1) % basemaps.length;
+  map.addLayer(basemaps[currentBasemap].layer);
+}
+
+// Modal & form handling
+const modal = document.getElementById('modal');
+const openBtn = document.getElementById('open-report');
+const cancelBtn = document.getElementById('cancel');
+const sendBtn = document.getElementById('send');
+const toast = document.getElementById('toast');
+
+openBtn.addEventListener('click', async ()=>{
+  modal.style.display='flex';
+  // try to get location
+  if(navigator.geolocation){
+    navigator.geolocation.getCurrentPosition(pos=>{
+      document.getElementById('lat').value = pos.coords.latitude.toFixed(6);
+      document.getElementById('lng').value = pos.coords.longitude.toFixed(6);
+    }, err=>{
+      console.warn('Geolocation error', err);
+    }, {enableHighAccuracy:true, timeout:5000});
+  }
+});
+cancelBtn.addEventListener('click', ()=>{ modal.style.display='none'; });
+
+sendBtn.addEventListener('click', async ()=>{
+  sendBtn.disabled = true;
+  sendBtn.innerText = 'Enviando...';
+
+  const tipo = document.getElementById('tipo').value;
+  const descripcion = document.getElementById('descripcion').value;
+  const lat = document.getElementById('lat').value;
+  const lng = document.getElementById('lng').value;
+  const file = document.getElementById('foto').files[0];
+
+  let fotoBase64 = null;
+  if(file){
+    fotoBase64 = await fileToBase64(file);
+  }
+
+  const payload = { action: 'new_report', tipo, descripcion, lat, lng, foto_base64: fotoBase64 };
+
+  try{
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if(json.success){
+      showToast('Reporte enviado. Quedará pendiente de validación.');
+      modal.style.display='none';
+      // limpiar form
+      document.getElementById('descripcion').value='';
+      document.getElementById('foto').value='';
+      // refrescar
+      await loadAndRender();
+    }else{
+      showToast('Error: ' + (json.message || 'No se pudo enviar'));
+    }
+  }catch(e){
+    console.error(e);
+    showToast('Error al enviar. Revisa la consola.');
+  }
+
+  sendBtn.disabled = false;
+  sendBtn.innerText = 'Enviar reporte';
+});
+
+function showToast(msg, time=3000){
+  toast.innerText = msg; toast.style.display='block';
+  setTimeout(()=> toast.style.display='none', time);
+}
+
+function fileToBase64(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=> resolve(reader.result.split(',')[1]); // devuelve solo base64 sin `data:*/*;base64,`
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Load + render
+async function loadAndRender(){
+  const pts = await fetchPoints();
+  addMarkers(pts);
+}
+
+// Buttons
+document.getElementById('btn-toggle-heat').addEventListener('click', ()=>{ toggleHeat(); });
+document.getElementById('btn-refresh').addEventListener('click', ()=>{ loadAndRender(); });
+document.getElementById('btn-basemap').addEventListener('click', ()=>{ changeBasemap(); });
+
+// init
+initMap();
+loadAndRender();
+
+</script>
